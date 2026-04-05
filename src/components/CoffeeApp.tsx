@@ -1,7 +1,18 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
+import { useState, useEffect, useRef } from "react";
+import {
+  collection,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  doc,
+  query,
+  orderBy,
+  onSnapshot,
+  serverTimestamp,
+} from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import { Order, CoffeeType, COFFEE_TYPES } from "@/types";
 
 const KNOWN_NAMES = [
@@ -32,32 +43,21 @@ export default function CoffeeApp() {
   const [allNames, setAllNames] = useState<string[]>(KNOWN_NAMES);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
-  const loadOrders = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("orders")
-      .select("*")
-      .order("created_at", { ascending: true });
-    if (!error && data) {
-      setOrders(data as Order[]);
-    }
-    setIsLoading(false);
+  // Real-time listener via Firestore onSnapshot
+  useEffect(() => {
+    const q = query(collection(db, "orders"), orderBy("created_at", "asc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      })) as Order[];
+      setOrders(docs);
+      setIsLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    loadOrders();
-
-    const channel = supabase
-      .channel("orders-channel")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "orders" },
-        () => { loadOrders(); }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [loadOrders]);
-
+  // Keep autocomplete names in sync with names seen in orders
   useEffect(() => {
     const namesFromOrders = orders.map((o) => o.person_name).filter(Boolean);
     const combined = Array.from(new Set([...KNOWN_NAMES, ...namesFromOrders])).sort();
@@ -87,29 +87,41 @@ export default function CoffeeApp() {
     if (selectedCoffee === "Outro" && !customCoffee.trim()) return;
 
     setIsSubmitting(true);
-    const { error } = await supabase.from("orders").insert([{
-      coffee_type: selectedCoffee,
-      custom_coffee: selectedCoffee === "Outro" ? customCoffee.trim() : null,
-      person_name: personName.trim(),
-      status: "pendente",
-    }]);
-
-    if (!error) {
+    try {
+      await addDoc(collection(db, "orders"), {
+        coffee_type: selectedCoffee,
+        custom_coffee: selectedCoffee === "Outro" ? customCoffee.trim() : null,
+        person_name: personName.trim(),
+        status: "pendente",
+        created_at: serverTimestamp(),
+      });
+      // Only reset form state after a successful write
       setSelectedCoffee(null);
       setCustomCoffee("");
       setPersonName("");
       setShowSuggestions(false);
       setActiveTab("lista");
+    } catch (err) {
+      console.error("Erro ao registar pedido:", err);
+    } finally {
+      setIsSubmitting(false);
     }
-    setIsSubmitting(false);
   };
 
   const handleMarkReady = async (orderId: string) => {
-    await supabase.from("orders").update({ status: "pronto" }).eq("id", orderId);
+    try {
+      await updateDoc(doc(db, "orders", orderId), { status: "pronto" });
+    } catch (err) {
+      console.error("Erro ao marcar pedido como pronto:", err);
+    }
   };
 
   const handleDeleteOrder = async (orderId: string) => {
-    await supabase.from("orders").delete().eq("id", orderId);
+    try {
+      await deleteDoc(doc(db, "orders", orderId));
+    } catch (err) {
+      console.error("Erro ao remover pedido:", err);
+    }
   };
 
   const pendingOrders = orders.filter((o) => o.status === "pendente");
